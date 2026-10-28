@@ -11,7 +11,7 @@ usage jobs work after a restore. This makes backups much smaller on large panels
 Run as root on the PasarGuard panel server:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/pasarguard-light-backup/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Aknuun/pasarguard-light-backup/main/install.sh)
 ```
 
 The backup service must already be configured (`BACKUP_SERVICE_ENABLED=true`),
@@ -79,9 +79,10 @@ No panel restart is needed.
   updates**. After updating PasarGuard, remove `/usr/local/bin/lib`, then run the
   installer again (or apply the same patch to the new lib). Until then the old
   scripts remain in use.
-- Tested with PasarGuard 5.5.1 and a Docker MySQL/MariaDB container, with both
-  `mysqldump` and `mariadb-dump`. Works with the standard
-  `/usr/local/bin/pasarguard` layout.
+- Requires `bash`, `python3`, and Docker (standard PasarGuard panel).
+- Tested with PasarGuard 5.5.1 and its Docker MySQL container (MySQL 9.7.4).
+  The schema dump uses `mariadb-dump` when present, otherwise `mysqldump`.
+  Works with the standard `/usr/local/bin/pasarguard` layout.
 
 ## Uninstall
 

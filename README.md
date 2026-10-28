@@ -1,3 +1,5 @@
+<h1 align="center"><a href="README.fa.md"><kbd>فارسی</kbd></a></h1>
+
 # PasarGuard Light Backup
 
 Adds **option 7** to `pasarguard backup-service`: backups skip the rows in

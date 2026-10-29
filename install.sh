@@ -107,6 +107,36 @@ append_light_schema() {
     } >>"$temp_dir/db_backup.sql"
     rm -f "$schema_file"
 }
+
+sqlite_light_prune() {
+    local snapshot="$1"
+    is_light_backup || return 0
+    [ -f "$snapshot" ] || return 1
+    command -v sqlite3 >/dev/null 2>&1 || return 1
+    if ! sqlite3 "$snapshot" \
+        "PRAGMA journal_mode=DELETE; DELETE FROM node_user_usages; DELETE FROM node_usages; VACUUM;" \
+        >>"$log_file" 2>&1; then
+        return 1
+    fi
+    rm -f "${snapshot}-wal" "${snapshot}-shm" "${snapshot}-journal" 2>/dev/null || true
+    return 0
+}
+'''
+
+SQLITE_HELPER = r'''
+sqlite_light_prune() {
+    local snapshot="$1"
+    is_light_backup || return 0
+    [ -f "$snapshot" ] || return 1
+    command -v sqlite3 >/dev/null 2>&1 || return 1
+    if ! sqlite3 "$snapshot" \
+        "PRAGMA journal_mode=DELETE; DELETE FROM node_user_usages; DELETE FROM node_usages; VACUUM;" \
+        >>"$log_file" 2>&1; then
+        return 1
+    fi
+    rm -f "${snapshot}-wal" "${snapshot}-shm" "${snapshot}-journal" 2>/dev/null || true
+    return 0
+}
 '''
 
 if "LIGHT_BACKUP_FILE=" not in s:
@@ -116,6 +146,12 @@ if "LIGHT_BACKUP_FILE=" not in s:
     changed.append("helpers")
 elif "append_light_schema()" not in s:
     sys.exit("partial light backup patch detected (helpers exist, append_light_schema missing)")
+
+if "sqlite_light_prune()" not in s:
+    if "backup_service() {" not in s:
+        sys.exit("backup_service() not found; unsupported PasarGuard backup lib")
+    s = s.replace("backup_service() {", SQLITE_HELPER + "\nbackup_service() {", 1)
+    changed.append("sqlite helper")
 
 if 'local light_status="OFF"' not in s:
     if '    local backup_proxy_url=""\n' in s:
@@ -181,6 +217,31 @@ if "LIGHT_IGNORE_ARGS" not in s:
                   '        fi\n', 1)
     changed.append("ignore args")
 
+if "LIGHT_PG_ARGS" not in s:
+    needle = '        local -a LIGHT_IGNORE_ARGS=()\n'
+    if needle not in s:
+        sys.exit("light ignore-args block not found")
+    s = s.replace(needle, needle +
+                  '        local -a LIGHT_PG_ARGS=()\n'
+                  '        if is_light_backup; then\n'
+                  "            LIGHT_PG_ARGS=(--exclude-table-data='*.node_user_usages' --exclude-table-data='*.node_usages')\n"
+                  '        fi\n', 1)
+    changed.append("postgres args")
+
+if 'sqlite_light_prune "$sqlite_snapshot_dir/$sqlite_basename"' not in s:
+    needle = ('                    elif ! sqlite3 "$sqlite_file" ".backup \'$sqlite_snapshot_dir/$sqlite_basename\'" >>"$log_file" 2>&1; then\n'
+              '                        error_messages+=("Failed to create SQLite backup snapshot.")\n'
+              '                    fi\n')
+    if needle not in s:
+        sys.exit("SQLite snapshot marker not found")
+    s = s.replace(needle,
+                  '                    elif ! sqlite3 "$sqlite_file" ".backup \'$sqlite_snapshot_dir/$sqlite_basename\'" >>"$log_file" 2>&1; then\n'
+                  '                        error_messages+=("Failed to create SQLite backup snapshot.")\n'
+                  '                    elif is_light_backup && ! sqlite_light_prune "$sqlite_snapshot_dir/$sqlite_basename"; then\n'
+                  '                        error_messages+=("Failed to prune usage tables from SQLite snapshot.")\n'
+                  '                    fi\n', 1)
+    changed.append("sqlite prune")
+
 lines = s.splitlines(True)
 dump_patched = 0
 for i, line in enumerate(lines):
@@ -191,6 +252,22 @@ for i, line in enumerate(lines):
             dump_patched += 1
 if dump_patched:
     changed.append(f"{dump_patched} dump lines")
+s = "".join(lines)
+
+lines = s.splitlines(True)
+pg_patched = 0
+for i, line in enumerate(lines):
+    if 'pg_dump -U' in line and ('>"$out_dir/$filename"' in line or '>"$temp_dir/db_backup.sql"' in line):
+        if "LIGHT_PG_ARGS" not in line:
+            if '>"$out_dir/$filename"' in line:
+                lines[i] = line.replace('>"$out_dir/$filename"',
+                                        '"${LIGHT_PG_ARGS[@]}" >"$out_dir/$filename"', 1)
+            else:
+                lines[i] = line.replace('>"$temp_dir/db_backup.sql"',
+                                        '"${LIGHT_PG_ARGS[@]}" >"$temp_dir/db_backup.sql"', 1)
+            pg_patched += 1
+if pg_patched:
+    changed.append(f"{pg_patched} pg_dump lines")
 s = "".join(lines)
 
 if 'append_light_schema "${container_name' not in s:
@@ -208,16 +285,21 @@ if 'append_light_schema "${container_name' not in s:
 required = [
     "LIGHT_BACKUP_FILE=",
     "append_light_schema()",
+    "sqlite_light_prune()",
     "Toggle light backup",
     'read -p "Enter your choice (1-7)',
     "LIGHT_IGNORE_ARGS",
+    "LIGHT_PG_ARGS",
     'append_light_schema "${container_name',
+    "Failed to prune usage tables from SQLite snapshot",
 ]
 for marker in required:
     if marker not in s:
         sys.exit(f"patch verification failed: {marker}")
 if s.count("LIGHT_IGNORE_ARGS[@]") < 7:
     sys.exit("patch verification failed: fewer than 7 MySQL dump lines patched")
+if s.count("LIGHT_PG_ARGS[@]") < 3:
+    sys.exit("patch verification failed: fewer than 3 PostgreSQL dump lines patched")
 
 tmp = path + ".new"
 with open(tmp, "w", encoding="utf-8") as f:
